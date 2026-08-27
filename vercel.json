@@ -1,0 +1,42 @@
+{
+  "__comment_overview": [
+    "Vercel deployment configuration.",
+    "",
+    "This file tells Vercel how to build and route the monorepo.",
+    "It defines two builds (backend + frontend) and routing rules.",
+    "",
+    "ROUTING LOGIC:",
+    "  1. Any request to /api/* is handled by the Node.js backend function.",
+    "     Vercel wraps backend/index.js as a serverless function.",
+    "  2. Everything else (/, /route, assets, etc.) is served from",
+    "     the compiled React frontend static files."
+  ],
+  "version": 2,
+  "builds": [
+    {
+      "__comment": "Backend: Vercel runs index.js as a Node.js serverless function",
+      "src": "backend/index.js",
+      "use": "@vercel/node"
+    },
+    {
+      "__comment": "Frontend: Vercel builds the React app with 'npm run build' (Vite) and serves the dist/ folder as static files",
+      "src": "frontend/package.json",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "__comment": "Rule 1: API requests go to the backend serverless function",
+      "src": "/api/(.*)",
+      "dest": "backend/index.js"
+    },
+    {
+      "__comment": "Rule 2: Everything else goes to the React frontend build output",
+      "src": "/(.*)",
+      "dest": "frontend/$1"
+    }
+  ]
+}
