@@ -162,7 +162,7 @@ export function OrderEntry({ onRunStarted }) {
         padding:    '1.25rem 1.25rem 1.5rem',
       }}>
         <h1 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '0.25rem' }}>
-          🚴 Lyna Delivery
+          🚴 Delivery
         </h1>
         <p style={{ fontSize: '0.85rem', opacity: 0.85 }}>Plan your delivery run</p>
       </div>
