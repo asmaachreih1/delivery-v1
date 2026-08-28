@@ -188,7 +188,7 @@ export function RouteView({ run: initialRun, onComplete }) {
     ? [position.lat, position.lng]
     : currentStop?.lat
     ? [currentStop.lat, currentStop.lng]
-    : [51.5, -0.1]; // London fallback — not ideal but safe
+    : [35.1856, 33.3823]; // London fallback — not ideal but safe
 
   // The dashed blue route line: starts at driver's position,
   // runs through pending stops in their optimised order
