@@ -21,7 +21,7 @@
 
 import React from 'react';
 
-export function RunComplete({ run, onNewRun }) {
+export default function RunComplete({ run, onNewRun }) {
   const route = run.route || [];
 
   // Identify late deliveries: actual delivery time was after the window closed
