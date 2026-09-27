@@ -40,7 +40,7 @@ const emptyStop = () => ({
   windowClose: '', // 'HH:MM' — latest delivery time
 });
 
-export function OrderEntry({ onRunStarted }) {
+export default function OrderEntry({ onRunStarted }) {
   // Restaurant state: text address + optional coordinates if picked from autocomplete
   const [restaurant, setRestaurant] = useState({ address: '', lat: null, lng: null });
 
