@@ -34,8 +34,8 @@ export function RunComplete({ run, onNewRun }) {
 
   // Format total minutes into "Xh Ym" or just "Y min" if under an hour
   const totalMinutes = run.totalMinutes || 0;
-  const hours        = Math.floor(totalMinutes / 60);
-  const mins         = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  const mins = totalMinutes % 60;
 
   return (
     <div style={{ minHeight: '100dvh', background: 'var(--gray-50)', display: 'flex', flexDirection: 'column' }}>
