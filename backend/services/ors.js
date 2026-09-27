@@ -1,57 +1,90 @@
+// backend/services/ors.js
+// Google Maps APIs: Geocoding, Places Autocomplete, Place Details, Distance Matrix
+
 const axios = require('axios');
 
-const ORS_BASE = 'https://api.openrouteservice.org';
-const NOM_BASE = 'https://nominatim.openstreetmap.org';
-const API_KEY  = process.env.ORS_API_KEY;
-const NOM_HEADERS = { 'User-Agent': 'DeliveryV1/1.0 (delivery-app)' };
+const GOOGLE_KEY = process.env.GOOGLE_MAPS_KEY;
+const GOOGLE_BASE = 'https://maps.googleapis.com/maps/api';
 
+// ── Geocode a single address string → { lat, lng, display }
 async function geocodeAddress(address) {
-  const res = await axios.get(`${NOM_BASE}/search`, {
-    params: { q: address, format: 'json', limit: 1 },
-    headers: NOM_HEADERS,
-    timeout: 8000,
+  const res = await axios.get(`${GOOGLE_BASE}/geocode/json`, {
+    params: { address, key: GOOGLE_KEY }
   });
-  if (!res.data || res.data.length === 0) throw new Error(`Address not found: "${address}"`);
-  const place = res.data[0];
-  return { lat: parseFloat(place.lat), lng: parseFloat(place.lon), label: place.display_name };
+  const results = res.data.results;
+  if (!results || results.length === 0) throw new Error(`Cannot geocode: ${address}`);
+  const loc = results[0].geometry.location;
+  return { lat: loc.lat, lng: loc.lng, display: results[0].formatted_address };
 }
 
+// ── Geocode multiple addresses in parallel
 async function geocodeAll(addresses) {
-  const results = await Promise.all(
-    addresses.map(async (addr, i) => {
-      try { return await geocodeAddress(addr); }
-      catch (err) { throw new Error(`Stop ${i + 1}: ${err.message}`); }
-    })
-  );
-  return results;
+  return Promise.all(addresses.map(geocodeAddress));
 }
 
-async function autocomplete(text) {
-  if (!text || text.length < 3) return [];
-  const res = await axios.get(`${NOM_BASE}/search`, {
-    params: { q: text, format: 'json', limit: 5 },
-    headers: NOM_HEADERS,
-    timeout: 6000,
+// ── Autocomplete suggestions for a partial query (returns array of { label, place_id })
+async function autocomplete(text, sessiontoken) {
+  const res = await axios.get(`${GOOGLE_BASE}/place/autocomplete/json`, {
+    params: {
+      input: text,
+      key: GOOGLE_KEY,
+      language: 'tr',
+      components: 'country:tr',   // restrict to Turkey
+      sessiontoken                // groups autocomplete + detail into 1 billing session
+    }
   });
-  return (res.data || []).map(p => ({
-    label: p.display_name,
-    lat: parseFloat(p.lat),
-    lng: parseFloat(p.lon),
-  }));
+  const preds = res.data.predictions || [];
+  return preds.map(p => ({ label: p.description, place_id: p.place_id }));
 }
 
+// ── Resolve a place_id to { lat, lng } using Place Details
+async function getPlaceCoords(place_id, sessiontoken) {
+  const res = await axios.get(`${GOOGLE_BASE}/place/details/json`, {
+    params: {
+      place_id,
+      fields: 'geometry',
+      key: GOOGLE_KEY,
+      sessiontoken
+    }
+  });
+  const loc = res.data.result?.geometry?.location;
+  if (!loc) throw new Error(`No geometry for place_id: ${place_id}`);
+  return { lat: loc.lat, lng: loc.lng };
+}
+
+// ── Build NxN travel-time matrix (minutes) via Distance Matrix API
+// points = [{ lat, lng }, ...]
 async function getTravelTimeMatrix(points) {
-  if (!API_KEY) throw new Error('ORS_API_KEY not set');
-  if (points.length < 2) throw new Error('Need at least 2 points');
-  const locations = points.map(p => [p.lng, p.lat]);
-  const res = await axios.post(
-    `${ORS_BASE}/v2/matrix/driving-car`,
-    { locations, metrics: ['duration'], resolve_locations: false },
-    { headers: { Authorization: API_KEY, 'Content-Type': 'application/json' }, timeout: 12000 }
-  );
-  const rawMatrix = res.data?.durations;
-  if (!rawMatrix) throw new Error('ORS returned no duration matrix');
-  return rawMatrix.map(row => row.map(sec => Math.round((sec / 60) * 10) / 10));
+  const n = points.length;
+  const latlngs = points.map(p => `${p.lat},${p.lng}`).join('|');
+
+  const res = await axios.get(`${GOOGLE_BASE}/distancematrix/json`, {
+    params: {
+      origins: latlngs,
+      destinations: latlngs,
+      mode: 'driving',
+      departure_time: 'now',
+      traffic_model: 'best_guess',
+      key: GOOGLE_KEY
+    }
+  });
+
+  const rows = res.data.rows;
+  const matrix = [];
+  for (let i = 0; i < n; i++) {
+    matrix[i] = [];
+    for (let j = 0; j < n; j++) {
+      const el = rows[i].elements[j];
+      if (el.status !== 'OK') {
+        matrix[i][j] = 999; // unreachable
+      } else {
+        // duration_in_traffic when available, else duration
+        const secs = (el.duration_in_traffic || el.duration).value;
+        matrix[i][j] = Math.round(secs / 60); // → minutes
+      }
+    }
+  }
+  return matrix;
 }
 
-module.exports = { geocodeAddress, geocodeAll, getTravelTimeMatrix, autocomplete };
+module.exports = { geocodeAddress, geocodeAll, autocomplete, getPlaceCoords, getTravelTimeMatrix };
