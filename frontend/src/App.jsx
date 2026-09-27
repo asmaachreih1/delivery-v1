@@ -42,10 +42,10 @@
 // ============================================================
 
 import React, { useState } from 'react';
-import { OrderEntry }  from './pages/OrderEntry';
-import { AlertScreen } from './pages/AlertScreen';
-import { RouteView }   from './pages/RouteView';
-import { RunComplete } from './pages/RunComplete';
+import OrderEntry  from './pages/OrderEntry';
+import AlertScreen from './pages/AlertScreen';
+import RouteView   from './pages/RouteView';
+import RunComplete from './pages/RunComplete';
 
 export default function App() {
   // Which screen to show. Starts on the order entry form.
