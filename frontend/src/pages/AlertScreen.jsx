@@ -32,7 +32,7 @@
 
 import React from 'react';
 
-export function AlertScreen({ run, onProceed, onBack }) {
+export default function AlertScreen({ run, onProceed, onBack }) {
   const isInfeasible = run.status === 'infeasible';
   const isWarning = run.status === 'warning';
 
