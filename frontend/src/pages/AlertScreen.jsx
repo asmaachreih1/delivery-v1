@@ -34,7 +34,7 @@ import React from 'react';
 
 export function AlertScreen({ run, onProceed, onBack }) {
   const isInfeasible = run.status === 'infeasible';
-  const isWarning    = run.status === 'warning';
+  const isWarning = run.status === 'warning';
 
   // GREEN: skip this screen entirely
   // This handles the case where App.jsx sends us here even for 'ok' status
