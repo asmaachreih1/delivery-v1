@@ -90,12 +90,12 @@ export default function OrderEntry({ onRunStarted }) {
   function validate() {
     const errs = {};
 
-    if (!restaurant.address.trim()) {
+   if (!(restaurant.address || '').trim()) {
       errs.restaurant = 'Restaurant address required';
     }
 
     stops.forEach((s, i) => {
-      if (!s.address.trim())  errs[`stop_${i}_address`] = 'Address required';
+      if (!(s.address || '').trim()) errs[`stop_${i}_address`] = 'Address required';
       if (!s.windowOpen)      errs[`stop_${i}_open`]    = 'Required';
       if (!s.windowClose)     errs[`stop_${i}_close`]   = 'Required';
       // windowClose must be strictly after windowOpen
