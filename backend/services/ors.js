@@ -22,34 +22,49 @@ async function geocodeAll(addresses) {
   return Promise.all(addresses.map(geocodeAddress));
 }
 
-// ── Autocomplete suggestions for a partial query (returns array of { label, place_id })
+
+
+// ── Autocomplete suggestions using Places API (New)
 async function autocomplete(text, sessiontoken) {
-  const res = await axios.get(`${GOOGLE_BASE}/place/autocomplete/json`, {
-    params: {
+  const res = await axios.post(
+    'https://places.googleapis.com/v1/places:autocomplete',
+    {
       input: text,
-      key: GOOGLE_KEY,
-      language: 'tr',
-      components: 'country:tr',   // restrict to Turkey
-      sessiontoken                // groups autocomplete + detail into 1 billing session
+      includedRegionCodes: ['tr'],
+      languageCode: 'tr',
+      sessionToken: sessiontoken
+    },
+    {
+      headers: {
+        'X-Goog-Api-Key': GOOGLE_KEY,
+        'Content-Type': 'application/json'
+      }
     }
-  });
-  const preds = res.data.predictions || [];
-  return preds.map(p => ({ label: p.description, place_id: p.place_id }));
+  );
+  const suggestions = res.data.suggestions || [];
+  return suggestions
+    .filter(s => s.placePrediction)
+    .map(s => ({
+      label: s.placePrediction.text.text,
+      place_id: s.placePrediction.placeId
+    }));
 }
 
-// ── Resolve a place_id to { lat, lng } using Place Details
+// ── Resolve a place_id to { lat, lng } using Places API (New)
 async function getPlaceCoords(place_id, sessiontoken) {
-  const res = await axios.get(`${GOOGLE_BASE}/place/details/json`, {
-    params: {
-      place_id,
-      fields: 'geometry',
-      key: GOOGLE_KEY,
-      sessiontoken
+  const res = await axios.get(
+    `https://places.googleapis.com/v1/places/${place_id}`,
+    {
+      headers: {
+        'X-Goog-Api-Key': GOOGLE_KEY,
+        'X-Goog-FieldMask': 'location'
+      },
+      params: { sessionToken: sessiontoken }
     }
-  });
-  const loc = res.data.result?.geometry?.location;
-  if (!loc) throw new Error(`No geometry for place_id: ${place_id}`);
-  return { lat: loc.lat, lng: loc.lng };
+  );
+  const loc = res.data.location;
+  if (!loc) throw new Error(`No location for place_id: ${place_id}`);
+  return { lat: loc.latitude, lng: loc.longitude };
 }
 
 // ── Build NxN travel-time matrix (minutes) via Distance Matrix API
