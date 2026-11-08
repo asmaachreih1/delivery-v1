@@ -29,23 +29,28 @@ const now = () => {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
-// Factory function for a blank stop object.
-// We use a function (not a constant) so each call gives a fresh object.
-const emptyStop = () => ({
-  name:    '',     // customer name — optional
-  address: '',     // delivery address text
-  lat:     null,   // latitude — set when driver picks from autocomplete
-  lng:     null,   // longitude — set when driver picks from autocomplete
-  windowOpen:  '', // 'HH:MM' — earliest delivery time
-  windowClose: '', // 'HH:MM' — latest delivery time
+// Helper: add minutes to current time and format as "HH:MM"
+const timeOffset = (mins) => {
+  const d = new Date(Date.now() + mins * 60 * 1000);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+};
+
+// Factory function for a stop object with sensible default time windows
+const emptyStop = (i = 0) => ({
+  name:        '',     // customer name — optional
+  address:     '',     // delivery address text
+  lat:         null,   // latitude — set when driver picks from autocomplete
+  lng:         null,   // longitude — set when driver picks from autocomplete
+  windowOpen:  timeOffset(15 + i * 15), // e.g. 15m from now
+  windowClose: timeOffset(45 + i * 15), // e.g. 45m from now
 });
 
 export default function OrderEntry({ onRunStarted }) {
   // Restaurant state: text address + optional coordinates if picked from autocomplete
   const [restaurant, setRestaurant] = useState({ address: '', lat: null, lng: null });
 
-  // Array of stop objects — start with 2 empty stops
-  const [stops, setStops] = useState([emptyStop(), emptyStop()]);
+  // Array of stop objects — start with 1 stop (driver can tap + to add more)
+  const [stops, setStops] = useState([emptyStop(0)]);
 
   // Departure time string "HH:MM" — defaults to right now
   const [departureTime, setDepartureTime] = useState(now());
@@ -72,7 +77,7 @@ export default function OrderEntry({ onRunStarted }) {
   /** Add a new blank stop (max 8) */
   function addStop() {
     if (stops.length >= 8) return;
-    setStops(prev => [...prev, emptyStop()]);
+    setStops(prev => [...prev, emptyStop(prev.length)]);
   }
 
   /** Remove a stop by index (min 1 stop must remain) */
@@ -201,6 +206,7 @@ export default function OrderEntry({ onRunStarted }) {
             type="time"
             value={departureTime}
             onChange={e => setDepartureTime(e.target.value)}
+            onInput={e => setDepartureTime(e.target.value)}
             onBlur={e => setDepartureTime(e.target.value)}
             className={errors.departure ? 'error' : ''}
           />
@@ -282,6 +288,7 @@ export default function OrderEntry({ onRunStarted }) {
                           type="time"
                           value={stop.windowOpen}
                           onChange={e => updateStop(i, 'windowOpen', e.target.value)}
+                          onInput={e => updateStop(i, 'windowOpen', e.target.value)}
                           onBlur={e => updateStop(i, 'windowOpen', e.target.value)}
                           className={errors[`stop_${i}_open`] ? 'error' : ''}
                         />
@@ -298,6 +305,7 @@ export default function OrderEntry({ onRunStarted }) {
                           type="time"
                           value={stop.windowClose}
                           onChange={e => updateStop(i, 'windowClose', e.target.value)}
+                          onInput={e => updateStop(i, 'windowClose', e.target.value)}
                           onBlur={e => updateStop(i, 'windowClose', e.target.value)}
                           className={errors[`stop_${i}_close`] ? 'error' : ''}
                         />

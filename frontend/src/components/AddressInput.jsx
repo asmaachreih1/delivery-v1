@@ -10,7 +10,7 @@ function newToken() {
   return Math.random().toString(36).slice(2);
 }
 
-export default function AddressInput({ value, onChange, onSelect, placeholder }) {
+export default function AddressInput({ value, onChange, onSelect, placeholder, error }) {
   const [suggestions, setSuggestions] = useState([]);
   const [loading, setLoading]         = useState(false);
   const sessiontoken                  = useRef(newToken());
@@ -63,15 +63,21 @@ export default function AddressInput({ value, onChange, onSelect, placeholder })
         value={value}
         onChange={handleChange}
         placeholder={placeholder || 'Enter address…'}
+        className={error ? 'error' : ''}
         style={{
           width: '100%',
           padding: '10px 12px',
           fontSize: '16px',
-          border: '1px solid #ccc',
+          border: error ? '1.5px solid var(--red, #ef4444)' : '1px solid #ccc',
           borderRadius: '8px',
           boxSizing: 'border-box',
         }}
       />
+      {error && (
+        <p style={{ color: 'var(--red, #ef4444)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
+          {error}
+        </p>
+      )}
 
       {loading && (
         <div style={{ fontSize: '12px', color: '#888', padding: '4px 12px' }}>
