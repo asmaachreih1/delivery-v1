@@ -1,7 +1,7 @@
 // frontend/src/utils/maps.js
 // Centralized loader and helpers for Google Maps JS API
 
-export const GOOGLE_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || 'AIzaSyD2Xja_jxqsW3KI06HyoqAoqXsT78o829E';
+export const GOOGLE_KEY = import.meta.env.VITE_GOOGLE_MAPS_KEY || '';
 export const DEFAULT_CENTER = { lat: 38.6191, lng: 27.4289 }; // Manisa, Turkey
 
 export function loadGoogleMaps() {
