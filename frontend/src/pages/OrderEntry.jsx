@@ -201,6 +201,7 @@ export default function OrderEntry({ onRunStarted }) {
             type="time"
             value={departureTime}
             onChange={e => setDepartureTime(e.target.value)}
+            onBlur={e => setDepartureTime(e.target.value)}
             className={errors.departure ? 'error' : ''}
           />
           {errors.departure && (
@@ -281,6 +282,7 @@ export default function OrderEntry({ onRunStarted }) {
                           type="time"
                           value={stop.windowOpen}
                           onChange={e => updateStop(i, 'windowOpen', e.target.value)}
+                          onBlur={e => updateStop(i, 'windowOpen', e.target.value)}
                           className={errors[`stop_${i}_open`] ? 'error' : ''}
                         />
                         {errors[`stop_${i}_open`] && (
@@ -296,6 +298,7 @@ export default function OrderEntry({ onRunStarted }) {
                           type="time"
                           value={stop.windowClose}
                           onChange={e => updateStop(i, 'windowClose', e.target.value)}
+                          onBlur={e => updateStop(i, 'windowClose', e.target.value)}
                           className={errors[`stop_${i}_close`] ? 'error' : ''}
                         />
                         {errors[`stop_${i}_close`] && (
