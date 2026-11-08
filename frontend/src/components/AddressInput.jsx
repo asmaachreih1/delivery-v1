@@ -43,13 +43,14 @@ export default function AddressInput({ value, onChange, onSelect, placeholder, e
     onChange(suggestion.label);
     setSuggestions([]);
 
+    const text = suggestion.label;
     // Resolve place_id → coordinates
     try {
       const coords = await api.getPlaceCoords(suggestion.place_id, sessiontoken.current);
-      onSelect({ address: suggestion.label, lat: coords.lat, lng: coords.lng });
+      onSelect({ address: text, label: text, lat: coords.lat, lng: coords.lng });
     } catch {
       // If coords fail, still set address text (user can retry)
-      onSelect({ address: suggestion.label, lat: null, lng: null });
+      onSelect({ address: text, label: text, lat: null, lng: null });
     }
 
     // Start fresh session token after a complete autocomplete+detail cycle

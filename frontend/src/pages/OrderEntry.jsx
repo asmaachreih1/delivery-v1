@@ -190,7 +190,7 @@ export default function OrderEntry({ onRunStarted }) {
           <AddressInput
             value={restaurant.address}
             onChange={(val) => setRestaurant(r => ({ ...r, address: val, lat: null, lng: null }))}
-            onSelect={(s) => setRestaurant({ address: s.label, lat: s.lat, lng: s.lng })}
+            onSelect={(s) => setRestaurant({ address: s.address || s.label || '', lat: s.lat, lng: s.lng })}
             placeholder="Restaurant address..."
             error={errors.restaurant}
           />
@@ -267,10 +267,10 @@ export default function OrderEntry({ onRunStarted }) {
                     value={stop.address}
                     onChange={(val) => updateStop(i, 'address', val)}
                     onSelect={(s) => {
-                      // When driver picks from autocomplete, capture all three values
-                      updateStop(i, 'address', s.label);
-                      updateStop(i, 'lat', s.lat);
-                      updateStop(i, 'lng', s.lng);
+                      const addr = s.address || s.label || '';
+                      setStops(prev => prev.map((st, idx) => 
+                        idx === i ? { ...st, address: addr, lat: s.lat, lng: s.lng } : st
+                      ));
                     }}
                     placeholder="Delivery address..."
                     error={errors[`stop_${i}_address`]}
