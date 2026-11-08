@@ -1,357 +1,758 @@
-// ============================================================
 // frontend/src/pages/OrderEntry.jsx
-// ============================================================
-// Screen 1: The order entry form.
-//
-// This is the first thing the driver sees when they open the app.
-// They fill in:
-//   - Restaurant address (the starting point)
-//   - Departure time (when they plan to leave)
-//   - 1–8 delivery stops, each with:
-//       - Customer name (optional, for display)
-//       - Delivery address (with autocomplete)
-//       - Time window: earliest + latest acceptable delivery time
-//
-// When the driver taps "Calculate Route":
-//   1. Client-side validation runs first (no empty fields, valid windows)
-//   2. If valid, POST /api/run/start is called
-//   3. Backend geocodes addresses, fetches traffic matrix, runs TSPTW
-//   4. Returns a run object → parent (App.jsx) decides which screen to show
-// ============================================================
+// Map-centric order entry: Driver taps on Google Map or searches to place
+// the restaurant and delivery stops, with user-friendly quick time presets.
 
-import React, { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import AddressInput from '../components/AddressInput';
 import api from '../utils/api';
+import { loadGoogleMaps, DEFAULT_CENTER } from '../utils/maps';
 
-// Helper: get current time as "HH:MM" string, used as default departure time
+// Helper: current time as "HH:MM"
 const now = () => {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 
-// Helper: add minutes to current time and format as "HH:MM"
-const timeOffset = (mins) => {
-  const d = new Date(Date.now() + mins * 60 * 1000);
-  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+// Helper: add minutes to a base time string "HH:MM" (or now)
+const addMinutesToTime = (timeStr, mins) => {
+  const d = new Date();
+  if (timeStr && timeStr.includes(':')) {
+    const [h, m] = timeStr.split(':').map(Number);
+    d.setHours(h, m, 0, 0);
+  }
+  const target = new Date(d.getTime() + mins * 60 * 1000);
+  return `${String(target.getHours()).padStart(2, '0')}:${String(target.getMinutes()).padStart(2, '0')}`;
 };
 
-// Factory function for a stop object with sensible default time windows
-const emptyStop = (i = 0) => ({
-  name:        '',     // customer name — optional
-  address:     '',     // delivery address text
-  lat:         null,   // latitude — set when driver picks from autocomplete
-  lng:         null,   // longitude — set when driver picks from autocomplete
-  windowOpen:  timeOffset(15 + i * 15), // e.g. 15m from now
-  windowClose: timeOffset(45 + i * 15), // e.g. 45m from now
-});
+// Blank stop factory with prefilled friendly time window
+const createStop = (depTime, index = 0) => {
+  const openMins = 15 + index * 15;
+  const closeMins = openMins + 30;
+  return {
+    name: '',
+    address: '',
+    lat: null,
+    lng: null,
+    windowOpen: addMinutesToTime(depTime, openMins),
+    windowClose: addMinutesToTime(depTime, closeMins),
+  };
+};
 
 export default function OrderEntry({ onRunStarted }) {
-  // Restaurant state: text address + optional coordinates if picked from autocomplete
-  const [restaurant, setRestaurant] = useState({ address: '', lat: null, lng: null });
-
-  // Array of stop objects — start with 1 stop (driver can tap + to add more)
-  const [stops, setStops] = useState([emptyStop(0)]);
-
-  // Departure time string "HH:MM" — defaults to right now
   const [departureTime, setDepartureTime] = useState(now());
+  const [restaurant, setRestaurant] = useState({ address: '', lat: null, lng: null });
+  const [stops, setStops] = useState([createStop(now(), 0)]);
 
-  // Loading state while waiting for the backend
+  // Which pin is currently being placed on the map: 'restaurant' or stop index (0, 1, 2...)
+  const [activeTarget, setActiveTarget] = useState('restaurant');
+  const activeTargetRef = useRef(activeTarget);
+  activeTargetRef.current = activeTarget;
+
   const [loading, setLoading] = useState(false);
-
-  // Field-level validation errors: { restaurant: '...', stop_0_address: '...', etc. }
   const [errors, setErrors] = useState({});
-
-  // Top-level error from the server (geocoding failure, timeout, etc.)
   const [globalError, setGlobalError] = useState('');
+  const [geocodingMap, setGeocodingMap] = useState(false);
 
-  // ── Stop management ───────────────────────────────────────
+  // Map references
+  const stopsRef = useRef(stops);
+  stopsRef.current = stops;
+  const mapDivRef = useRef(null);
+  const mapRef = useRef(null);
+  const geocoderRef = useRef(null);
+  const restMarkerRef = useRef(null);
+  const stopMarkersRef = useRef([]);
+  const previewLineRef = useRef(null);
 
-  /**
-   * Update a single field on a single stop.
-   * Uses functional update form so we always work from the latest state.
-   */
-  function updateStop(i, field, value) {
-    setStops(prev => prev.map((s, idx) => idx === i ? { ...s, [field]: value } : s));
-  }
+  // ── 1. Initialize Google Map
+  useEffect(() => {
+    let isMounted = true;
 
-  /** Add a new blank stop (max 8) */
-  function addStop() {
+    loadGoogleMaps()
+      .then((maps) => {
+        if (!isMounted || !mapDivRef.current) return;
+
+        geocoderRef.current = new maps.Geocoder();
+
+        const map = new maps.Map(mapDivRef.current, {
+          center: DEFAULT_CENTER,
+          zoom: 13,
+          mapTypeControl: false,
+          streetViewControl: false,
+          fullscreenControl: false,
+          zoomControl: true,
+          styles: [
+            { featureType: 'poi', elementType: 'labels', stylers: [{ visibility: 'off' }] },
+          ],
+        });
+        mapRef.current = map;
+
+        // Try getting driver's current location to center map
+        if (navigator.geolocation) {
+          navigator.geolocation.getCurrentPosition(
+            (pos) => {
+              if (!isMounted) return;
+              map.setCenter({ lat: pos.coords.latitude, lng: pos.coords.longitude });
+            },
+            () => {} // fallback to default center
+          );
+        }
+
+        // Tap/Click on Map to place location for active target
+        map.addListener('click', (e) => {
+          const lat = e.latLng.lat();
+          const lng = e.latLng.lng();
+          handleMapClickCoords(lat, lng);
+        });
+      })
+      .catch((err) => {
+        console.error('Failed to load Google Maps:', err);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // ── 2. Handle map click / reverse geocoding
+  const handleMapClickCoords = (lat, lng, explicitTarget) => {
+    setGeocodingMap(true);
+    setErrors({});
+
+    const currentTarget = explicitTarget !== undefined ? explicitTarget : activeTargetRef.current;
+    const currentStops = stopsRef.current;
+
+    const geocoder = geocoderRef.current || (window.google?.maps && new window.google.maps.Geocoder());
+    if (!geocoder) {
+      applyCoordsToTarget(`Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`, lat, lng, currentTarget, currentStops);
+      setGeocodingMap(false);
+      return;
+    }
+
+    geocoder.geocode({ location: { lat, lng } }, (results, status) => {
+      setGeocodingMap(false);
+      const addressText = (status === 'OK' && results?.[0]?.formatted_address)
+        ? results[0].formatted_address
+        : `Location (${lat.toFixed(4)}, ${lng.toFixed(4)})`;
+
+      applyCoordsToTarget(addressText, lat, lng, currentTarget, currentStops);
+    });
+  };
+
+  const applyCoordsToTarget = (address, lat, lng, target, currentStops) => {
+    if (target === 'restaurant') {
+      setRestaurant({ address, lat, lng });
+      // If stop 0 has no location yet, automatically switch focus to stop 0 for next tap
+      if (!currentStops[0]?.lat) {
+        setActiveTarget(0);
+      }
+    } else {
+      const idx = typeof target === 'number' ? target : 0;
+      setStops((prev) =>
+        prev.map((s, i) => (i === idx ? { ...s, address, lat, lng } : s))
+      );
+    }
+  };
+
+  // ── 3. Synchronize Map Markers & Preview Route Line
+  useEffect(() => {
+    if (!mapRef.current || !window.google?.maps) return;
+    const maps = window.google.maps;
+    const map = mapRef.current;
+
+    // Restaurant marker
+    if (restaurant.lat && restaurant.lng) {
+      const pos = { lat: restaurant.lat, lng: restaurant.lng };
+      if (!restMarkerRef.current) {
+        restMarkerRef.current = new maps.Marker({
+          position: pos,
+          map,
+          draggable: true,
+          title: 'Restaurant (Start point)',
+          icon: {
+            path: maps.SymbolPath.CIRCLE,
+            scale: 13,
+            fillColor: '#10b981',
+            fillOpacity: 1,
+            strokeColor: '#ffffff',
+            strokeWeight: 3,
+          },
+          label: { text: '🏪', fontSize: '13px' },
+        });
+
+        restMarkerRef.current.addListener('dragend', (e) => {
+          handleMapClickCoords(e.latLng.lat(), e.latLng.lng(), 'restaurant');
+        });
+      } else {
+        restMarkerRef.current.setPosition(pos);
+      }
+    } else if (restMarkerRef.current) {
+      restMarkerRef.current.setMap(null);
+      restMarkerRef.current = null;
+    }
+
+    // Stop markers
+    stopMarkersRef.current.forEach((m) => m?.setMap(null));
+    stopMarkersRef.current = [];
+
+    stops.forEach((stop, i) => {
+      if (!stop.lat || !stop.lng) return;
+      const pos = { lat: stop.lat, lng: stop.lng };
+      const isSelected = activeTarget === i;
+
+      const marker = new maps.Marker({
+        position: pos,
+        map,
+        draggable: true,
+        title: `Stop ${i + 1}: ${stop.address}`,
+        icon: {
+          path: maps.SymbolPath.CIRCLE,
+          scale: isSelected ? 15 : 12,
+          fillColor: isSelected ? '#2563eb' : '#64748b',
+          fillOpacity: 1,
+          strokeColor: '#ffffff',
+          strokeWeight: isSelected ? 4 : 2,
+        },
+        label: {
+          text: String(i + 1),
+          color: '#ffffff',
+          fontWeight: 'bold',
+          fontSize: '12px',
+        },
+        zIndex: isSelected ? 999 : 100 + i,
+      });
+
+      marker.addListener('click', () => {
+        setActiveTarget(i);
+      });
+
+      marker.addListener('dragend', (e) => {
+        setActiveTarget(i);
+        handleMapClickCoords(e.latLng.lat(), e.latLng.lng(), i);
+      });
+
+      stopMarkersRef.current.push(marker);
+    });
+
+    // Preview Line
+    const linePath = [];
+    if (restaurant.lat && restaurant.lng) {
+      linePath.push({ lat: restaurant.lat, lng: restaurant.lng });
+    }
+    stops.forEach((s) => {
+      if (s.lat && s.lng) linePath.push({ lat: s.lat, lng: s.lng });
+    });
+
+    if (previewLineRef.current) {
+      previewLineRef.current.setMap(null);
+      previewLineRef.current = null;
+    }
+
+    if (linePath.length >= 2) {
+      previewLineRef.current = new maps.Polyline({
+        path: linePath,
+        geodesic: true,
+        strokeColor: '#2563eb',
+        strokeOpacity: 0.6,
+        strokeWeight: 4,
+        icons: [
+          {
+            icon: { path: 'M 0,-1 0,1', strokeOpacity: 1, scale: 3 },
+            offset: '0',
+            repeat: '15px',
+          },
+        ],
+        map,
+      });
+    }
+  }, [restaurant, stops, activeTarget]);
+
+  // ── 4. Helper actions
+  const addStop = () => {
     if (stops.length >= 8) return;
-    setStops(prev => [...prev, emptyStop(prev.length)]);
-  }
+    const newIdx = stops.length;
+    setStops((prev) => [...prev, createStop(departureTime, newIdx)]);
+    setActiveTarget(newIdx);
+  };
 
-  /** Remove a stop by index (min 1 stop must remain) */
-  function removeStop(i) {
+  const removeStop = (idx) => {
     if (stops.length <= 1) return;
-    setStops(prev => prev.filter((_, idx) => idx !== i));
-  }
+    setStops((prev) => prev.filter((_, i) => i !== idx));
+    setActiveTarget('restaurant');
+  };
 
-  // ── Client-side validation ────────────────────────────────
-  /**
-   * Check all required fields and time window logic.
-   * Returns an errors object — empty means everything is valid.
-   * Keys match the UI so we can highlight the right fields.
-   */
-  function validate() {
+  const updateStopField = (i, field, value) => {
+    setStops((prev) =>
+      prev.map((s, idx) => (idx === i ? { ...s, [field]: value } : s))
+    );
+  };
+
+  // Quick friendly preset button handler for time window
+  const applyQuickWindow = (i, durationMins) => {
+    const openTime = addMinutesToTime(departureTime, 10);
+    const closeTime = addMinutesToTime(departureTime, durationMins);
+    setStops((prev) =>
+      prev.map((s, idx) =>
+        idx === i ? { ...s, windowOpen: openTime, windowClose: closeTime } : s
+      )
+    );
+  };
+
+  // ── 5. Form Validation & Submission
+  const validate = () => {
     const errs = {};
-
-   if (!(restaurant.address || '').trim()) {
-      errs.restaurant = 'Restaurant address required';
+    if (!(restaurant.address || '').trim()) {
+      errs.restaurant = 'Restaurant start location required';
     }
 
     stops.forEach((s, i) => {
-      if (!(s.address || '').trim()) errs[`stop_${i}_address`] = 'Address required';
-      if (!s.windowOpen)      errs[`stop_${i}_open`]    = 'Required';
-      if (!s.windowClose)     errs[`stop_${i}_close`]   = 'Required';
-      // windowClose must be strictly after windowOpen
+      if (!(s.address || '').trim()) errs[`stop_${i}_address`] = 'Delivery address required';
+      if (!s.windowOpen) errs[`stop_${i}_open`] = 'Required';
+      if (!s.windowClose) errs[`stop_${i}_close`] = 'Required';
       if (s.windowOpen && s.windowClose && s.windowClose <= s.windowOpen) {
         errs[`stop_${i}_close`] = 'Must be after open time';
       }
     });
 
     if (!departureTime) errs.departure = 'Departure time required';
-
     return errs;
-  }
+  };
 
-  // ── Form submission ───────────────────────────────────────
-  async function handleSubmit() {
+  const handleSubmit = async () => {
     const errs = validate();
     setErrors(errs);
     setGlobalError('');
 
-    // Stop here if there are validation errors — show them to the driver
-    if (Object.keys(errs).length > 0) return;
+    if (Object.keys(errs).length > 0) {
+      // If restaurant error, select restaurant tab
+      if (errs.restaurant) {
+        setActiveTarget('restaurant');
+      } else {
+        // Find first stop with error
+        for (let i = 0; i < stops.length; i++) {
+          if (errs[`stop_${i}_address`] || errs[`stop_${i}_open`] || errs[`stop_${i}_close`]) {
+            setActiveTarget(i);
+            break;
+          }
+        }
+      }
+      return;
+    }
 
     setLoading(true);
     try {
-      // Build the payload the backend expects
       const payload = {
         restaurant: {
           address: restaurant.address,
-          lat:     restaurant.lat,  // null if not picked from autocomplete
-          lng:     restaurant.lng,  // null if not picked from autocomplete
+          lat: restaurant.lat,
+          lng: restaurant.lng,
         },
-        stops: stops.map(s => ({
-          // Use first part of address as name if driver left name blank
-          name:        s.name || s.address.split(',')[0],
-          address:     s.address,
-          lat:         s.lat,       // null if not from autocomplete
-          lng:         s.lng,       // null if not from autocomplete
-          windowOpen:  s.windowOpen,
+        stops: stops.map((s) => ({
+          name: s.name || s.address.split(',')[0],
+          address: s.address,
+          lat: s.lat,
+          lng: s.lng,
+          windowOpen: s.windowOpen,
           windowClose: s.windowClose,
         })),
-        departureTime, // "HH:MM" string — backend parses as today at that time
+        departureTime,
       };
 
       const run = await api.startRun(payload);
-      // Hand the run object to App.jsx which decides what screen to show
       onRunStarted(run);
-
     } catch (err) {
-      // Show server-side errors (bad address, API timeout, etc.)
       setGlobalError(err.message || 'Failed to calculate route. Please try again.');
     } finally {
       setLoading(false);
     }
-  }
+  };
 
-  // ── Render ────────────────────────────────────────────────
+  const currentActiveStop = typeof activeTarget === 'number' ? stops[activeTarget] : null;
+
   return (
-    <div style={{ minHeight: '100dvh', background: 'var(--gray-50)', paddingBottom: '2rem' }}>
+    <div style={{ position: 'relative', width: '100vw', height: '100dvh', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
 
-      {/* App header */}
+      {/* ── TOP FLOATING CONTROL BAR ──────────────────────────────────── */}
       <div style={{
-        background: 'var(--blue)',
-        color:      'var(--white)',
-        padding:    '1.25rem 1.25rem 1.5rem',
+        position: 'absolute',
+        top: '12px',
+        left: '12px',
+        right: '12px',
+        zIndex: 10,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: '8px',
       }}>
-        <h1 style={{ fontSize: '1.25rem', fontWeight: 700, marginBottom: '0.25rem' }}>
-          🚴 Delivery
-        </h1>
-        <p style={{ fontSize: '0.85rem', opacity: 0.85 }}>Plan your delivery run</p>
-      </div>
-
-      <div style={{ padding: '1.25rem', display: 'flex', flexDirection: 'column', gap: '1.25rem' }}>
-
-        {/* Server-side error banner */}
-        {globalError && (
-          <div className="alert alert-red">
-            <strong>Error:</strong> {globalError}
-          </div>
-        )}
-
-        {/* ── Restaurant section ──────────────────────────── */}
-        <div className="card" style={{ padding: '1.25rem' }}>
-          <h2 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'var(--navy)' }}>
-            🏪 Restaurant (start point)
-          </h2>
-          {/* AddressInput handles autocomplete and updates restaurant state */}
-          <AddressInput
-            value={restaurant.address}
-            onChange={(val) => setRestaurant(r => ({ ...r, address: val, lat: null, lng: null }))}
-            onSelect={(s) => setRestaurant({ address: s.address || s.label || '', lat: s.lat, lng: s.lng })}
-            placeholder="Restaurant address..."
-            error={errors.restaurant}
-          />
-        </div>
-
-        {/* ── Departure time ──────────────────────────────── */}
-        <div className="card" style={{ padding: '1.25rem' }}>
-          <h2 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '1rem', color: 'var(--navy)' }}>
-            🕐 Departure time
-          </h2>
-          {/* Native time picker — looks like the OS time picker on mobile */}
-          <input
-            type="time"
-            value={departureTime}
-            onChange={e => setDepartureTime(e.target.value)}
-            onInput={e => setDepartureTime(e.target.value)}
-            onBlur={e => setDepartureTime(e.target.value)}
-            className={errors.departure ? 'error' : ''}
-          />
-          {errors.departure && (
-            <p style={{ color: 'var(--red)', fontSize: '0.8rem', marginTop: '0.25rem' }}>
-              {errors.departure}
-            </p>
-          )}
-        </div>
-
-        {/* ── Delivery stops ──────────────────────────────── */}
-        <div>
-          <h2 style={{ fontSize: '1rem', fontWeight: 700, marginBottom: '0.75rem', color: 'var(--navy)' }}>
-            📦 Delivery stops ({stops.length})
-          </h2>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-            {stops.map((stop, i) => (
-              <div key={i} className="card" style={{ padding: '1.25rem' }}>
-
-                {/* Stop header: number badge + remove button */}
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <div style={{
-                      width: 28, height: 28, borderRadius: '50%',
-                      background: 'var(--blue)', color: 'var(--white)',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '0.85rem', fontWeight: 700, flexShrink: 0,
-                    }}>
-                      {i + 1}
-                    </div>
-                    <span style={{ fontWeight: 600, color: 'var(--navy)' }}>Stop {i + 1}</span>
-                  </div>
-                  {stops.length > 1 && (
-                    <button
-                      onClick={() => removeStop(i)}
-                      className="btn-secondary"
-                      style={{ padding: '0.35rem 0.75rem', fontSize: '0.8rem', color: 'var(--red)' }}
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-
-                {/* Stop fields */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
-
-                  {/* Customer name — optional, used for display on the map and stop cards */}
-                  <input
-                    type="text"
-                    placeholder="Customer name (optional)"
-                    value={stop.name}
-                    onChange={e => updateStop(i, 'name', e.target.value)}
-                  />
-
-                  {/* Address with autocomplete */}
-                  <AddressInput
-                    value={stop.address}
-                    onChange={(val) => updateStop(i, 'address', val)}
-                    onSelect={(s) => {
-                      const addr = s.address || s.label || '';
-                      setStops(prev => prev.map((st, idx) => 
-                        idx === i ? { ...st, address: addr, lat: s.lat, lng: s.lng } : st
-                      ));
-                    }}
-                    placeholder="Delivery address..."
-                    error={errors[`stop_${i}_address`]}
-                  />
-
-                  {/* Time window — two time pickers side by side */}
-                  <div>
-                    <p style={{ fontSize: '0.8rem', color: 'var(--gray-600)', marginBottom: '0.4rem', fontWeight: 600 }}>
-                      ⏱ Delivery time window
-                    </p>
-                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0.5rem' }}>
-                      {/* Earliest acceptable time (windowOpen) */}
-                      <div>
-                        <input
-                          type="time"
-                          value={stop.windowOpen}
-                          onChange={e => updateStop(i, 'windowOpen', e.target.value)}
-                          onInput={e => updateStop(i, 'windowOpen', e.target.value)}
-                          onBlur={e => updateStop(i, 'windowOpen', e.target.value)}
-                          className={errors[`stop_${i}_open`] ? 'error' : ''}
-                        />
-                        {errors[`stop_${i}_open`] && (
-                          <p style={{ color: 'var(--red)', fontSize: '0.75rem', marginTop: '0.2rem' }}>
-                            {errors[`stop_${i}_open`]}
-                          </p>
-                        )}
-                        <p style={{ fontSize: '0.75rem', color: 'var(--gray-400)', marginTop: '0.25rem' }}>Earliest</p>
-                      </div>
-                      {/* Latest acceptable time (windowClose) */}
-                      <div>
-                        <input
-                          type="time"
-                          value={stop.windowClose}
-                          onChange={e => updateStop(i, 'windowClose', e.target.value)}
-                          onInput={e => updateStop(i, 'windowClose', e.target.value)}
-                          onBlur={e => updateStop(i, 'windowClose', e.target.value)}
-                          className={errors[`stop_${i}_close`] ? 'error' : ''}
-                        />
-                        {errors[`stop_${i}_close`] && (
-                          <p style={{ color: 'var(--red)', fontSize: '0.75rem', marginTop: '0.2rem' }}>
-                            {errors[`stop_${i}_close`]}
-                          </p>
-                        )}
-                        <p style={{ fontSize: '0.75rem', color: 'var(--gray-400)', marginTop: '0.25rem' }}>Latest</p>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
+        {/* Top Header & Departure Bar */}
+        <div style={{
+          background: 'rgba(255, 255, 255, 0.96)',
+          backdropFilter: 'blur(8px)',
+          borderRadius: '16px',
+          padding: '10px 14px',
+          boxShadow: '0 4px 15px rgba(0,0,0,0.1)',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '18px' }}>🚴</span>
+            <strong style={{ fontSize: '14px', color: '#0f172a' }}>Delivery Planner</strong>
           </div>
 
-          {/* Add stop button — hidden when at maximum */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span style={{ fontSize: '12px', color: '#64748b' }}>Depart:</span>
+            <input
+              type="time"
+              value={departureTime}
+              onChange={(e) => setDepartureTime(e.target.value)}
+              onInput={(e) => setDepartureTime(e.target.value)}
+              onBlur={(e) => setDepartureTime(e.target.value)}
+              style={{
+                padding: '4px 8px',
+                fontSize: '13px',
+                fontWeight: 700,
+                width: 'auto',
+                border: '1px solid #cbd5e1',
+                borderRadius: '8px',
+              }}
+            />
+          </div>
+        </div>
+
+        {/* Target Switcher Tabs: [🏪 Restaurant] [📦 Stop 1] [+ Add Stop] */}
+        <div style={{
+          display: 'flex',
+          gap: '6px',
+          overflowX: 'auto',
+          paddingBottom: '2px',
+          scrollbarWidth: 'none',
+        }}>
+          {/* Restaurant Tab */}
+          <button
+            onClick={() => setActiveTarget('restaurant')}
+            style={{
+              padding: '8px 12px',
+              borderRadius: '12px',
+              fontSize: '13px',
+              fontWeight: 700,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              whiteSpace: 'nowrap',
+              background: activeTarget === 'restaurant' ? '#10b981' : 'rgba(255, 255, 255, 0.95)',
+              color: activeTarget === 'restaurant' ? '#ffffff' : '#334155',
+              border: activeTarget === 'restaurant' ? 'none' : '1px solid #cbd5e1',
+              boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+            }}
+          >
+            <span>🏪</span>
+            <span>Restaurant</span>
+            {restaurant.lat && <span style={{ color: activeTarget === 'restaurant' ? '#fff' : '#10b981' }}>✓</span>}
+          </button>
+
+          {/* Stops Tabs */}
+          {stops.map((s, i) => {
+            const isSelected = activeTarget === i;
+            const hasLocation = Boolean(s.lat && s.lng);
+            return (
+              <button
+                key={i}
+                onClick={() => setActiveTarget(i)}
+                style={{
+                  padding: '8px 12px',
+                  borderRadius: '12px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  whiteSpace: 'nowrap',
+                  background: isSelected ? '#2563eb' : 'rgba(255, 255, 255, 0.95)',
+                  color: isSelected ? '#ffffff' : '#334155',
+                  border: isSelected ? 'none' : '1px solid #cbd5e1',
+                  boxShadow: '0 2px 8px rgba(0,0,0,0.08)',
+                }}
+              >
+                <span>📦</span>
+                <span>Stop {i + 1}</span>
+                {hasLocation && <span style={{ color: isSelected ? '#fff' : '#2563eb' }}>✓</span>}
+              </button>
+            );
+          })}
+
+          {/* + Add Stop Tab */}
           {stops.length < 8 && (
             <button
               onClick={addStop}
-              className="btn-secondary"
-              style={{ marginTop: '0.75rem', width: '100%', padding: '0.75rem' }}
+              style={{
+                padding: '8px 12px',
+                borderRadius: '12px',
+                fontSize: '13px',
+                fontWeight: 700,
+                background: 'rgba(255, 255, 255, 0.9)',
+                color: '#2563eb',
+                border: '1.5px dashed #2563eb',
+                whiteSpace: 'nowrap',
+              }}
             >
-              + Add another stop
+              + Add Stop
             </button>
           )}
         </div>
 
-        {/* Submit button — triggers geocoding + algorithm */}
-        <button
-          onClick={handleSubmit}
-          disabled={loading}
-          className="btn-primary"
-          style={{ padding: '1.1rem', fontSize: '1.05rem' }}
-        >
-          {loading ? (
-            // Loading state: spinner + message
-            <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}>
-              <div className="spinner" style={{ width: 20, height: 20, borderTopColor: 'var(--white)' }} />
-              Calculating best route...
-            </span>
-          ) : '🗺 Calculate optimal route'}
-        </button>
+        {/* Global Error Notice if any */}
+        {globalError && (
+          <div className="alert alert-red" style={{ margin: 0, padding: '8px 12px', fontSize: '13px' }}>
+            ⚠️ {globalError}
+          </div>
+        )}
+      </div>
+
+      {/* ── INTERACTIVE GOOGLE MAP ────────────────────────────────────── */}
+      <div ref={mapDivRef} style={{ flex: 1, width: '100%', height: '100%' }} />
+
+      {/* Map Tap Guide Banner */}
+      <div style={{
+        position: 'absolute',
+        top: '120px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 5,
+        background: 'rgba(15, 23, 42, 0.75)',
+        backdropFilter: 'blur(4px)',
+        color: '#ffffff',
+        padding: '5px 12px',
+        borderRadius: '999px',
+        fontSize: '12px',
+        fontWeight: 600,
+        pointerEvents: 'none',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+      }}>
+        <span>📍</span>
+        <span>
+          {geocodingMap
+            ? 'Resolving address…'
+            : activeTarget === 'restaurant'
+            ? 'Tap map to place Restaurant (Start)'
+            : `Tap map to place Stop ${activeTarget + 1}`}
+        </span>
+      </div>
+
+      {/* ── BOTTOM DRAWER: Address Search, Time Window & Submit ──────── */}
+      <div style={{
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
+        zIndex: 10,
+        background: '#ffffff',
+        borderTopLeftRadius: '22px',
+        borderTopRightRadius: '22px',
+        boxShadow: '0 -8px 30px rgba(0, 0, 0, 0.15)',
+        padding: '16px 18px 20px',
+        maxHeight: '48dvh',
+        overflowY: 'auto',
+      }}>
+
+        {/* Active Target Header & Address Input */}
+        {activeTarget === 'restaurant' ? (
+          <div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+              <div style={{ fontWeight: 800, fontSize: '15px', color: '#0f172a', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <span>🏪</span> Restaurant Starting Location
+              </div>
+              <span style={{ fontSize: '12px', color: '#10b981', fontWeight: 600 }}>Start Point</span>
+            </div>
+
+            <AddressInput
+              value={restaurant.address}
+              onChange={(val) => setRestaurant((r) => ({ ...r, address: val, lat: null, lng: null }))}
+              onSelect={(s) => {
+                const addr = s.address || s.label || '';
+                setRestaurant({ address: addr, lat: s.lat, lng: s.lng });
+                if (mapRef.current && s.lat && s.lng) {
+                  mapRef.current.panTo({ lat: s.lat, lng: s.lng });
+                  mapRef.current.setZoom(15);
+                }
+              }}
+              placeholder="Search restaurant or tap map above…"
+              error={errors.restaurant}
+            />
+          </div>
+        ) : (
+          currentActiveStop && (
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <div style={{ fontWeight: 800, fontSize: '15px', color: '#0f172a', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span>📦</span> Stop {activeTarget + 1}
+                </div>
+                {stops.length > 1 && (
+                  <button
+                    onClick={() => removeStop(activeTarget)}
+                    style={{
+                      background: 'none',
+                      color: '#ef4444',
+                      fontSize: '13px',
+                      fontWeight: 700,
+                      padding: 0,
+                    }}
+                  >
+                    Delete Stop
+                  </button>
+                )}
+              </div>
+
+              {/* Customer Name (Optional) */}
+              <input
+                type="text"
+                placeholder="Customer name (optional)"
+                value={currentActiveStop.name}
+                onChange={(e) => updateStopField(activeTarget, 'name', e.target.value)}
+                style={{
+                  padding: '8px 12px',
+                  fontSize: '14px',
+                  marginBottom: '8px',
+                  borderRadius: '8px',
+                }}
+              />
+
+              {/* Delivery Address */}
+              <AddressInput
+                value={currentActiveStop.address}
+                onChange={(val) => updateStopField(activeTarget, 'address', val)}
+                onSelect={(s) => {
+                  const addr = s.address || s.label || '';
+                  setStops((prev) =>
+                    prev.map((st, idx) =>
+                      idx === activeTarget ? { ...st, address: addr, lat: s.lat, lng: s.lng } : st
+                    )
+                  );
+                  if (mapRef.current && s.lat && s.lng) {
+                    mapRef.current.panTo({ lat: s.lat, lng: s.lng });
+                    mapRef.current.setZoom(15);
+                  }
+                }}
+                placeholder="Search delivery address or tap map…"
+                error={errors[`stop_${activeTarget}_address`]}
+              />
+
+              {/* ── Simple & Friendly Time Window Selection ── */}
+              <div style={{ marginTop: '12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                  <span style={{ fontSize: '13px', fontWeight: 700, color: '#334155' }}>
+                    ⏱ Delivery Time Window
+                  </span>
+                  <span style={{ fontSize: '11px', color: '#64748b' }}>Quick presets:</span>
+                </div>
+
+                {/* Quick Presets Chips */}
+                <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+                  {[
+                    { label: '⚡ 20m', mins: 20 },
+                    { label: '🕐 35m', mins: 35 },
+                    { label: '📦 50m', mins: 50 },
+                    { label: '⏱ 1 hr', mins: 60 },
+                  ].map((preset, pIdx) => (
+                    <button
+                      key={pIdx}
+                      type="button"
+                      onClick={() => applyQuickWindow(activeTarget, preset.mins)}
+                      style={{
+                        flex: 1,
+                        padding: '6px 4px',
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        background: '#f1f5f9',
+                        color: '#1e293b',
+                        borderRadius: '8px',
+                        border: '1px solid #cbd5e1',
+                      }}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Manual Time Input Row */}
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px' }}>
+                  <div>
+                    <label style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', marginBottom: '2px' }}>
+                      Earliest (Open)
+                    </label>
+                    <input
+                      type="time"
+                      value={currentActiveStop.windowOpen}
+                      onChange={(e) => updateStopField(activeTarget, 'windowOpen', e.target.value)}
+                      onInput={(e) => updateStopField(activeTarget, 'windowOpen', e.target.value)}
+                      onBlur={(e) => updateStopField(activeTarget, 'windowOpen', e.target.value)}
+                      className={errors[`stop_${activeTarget}_open`] ? 'error' : ''}
+                      style={{ padding: '6px 8px', fontSize: '13px' }}
+                    />
+                    {errors[`stop_${activeTarget}_open`] && (
+                      <p style={{ color: '#ef4444', fontSize: '11px', marginTop: '2px' }}>
+                        {errors[`stop_${activeTarget}_open`]}
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <label style={{ fontSize: '11px', color: '#64748b', fontWeight: 600, display: 'block', marginBottom: '2px' }}>
+                      Latest (Deadline)
+                    </label>
+                    <input
+                      type="time"
+                      value={currentActiveStop.windowClose}
+                      onChange={(e) => updateStopField(activeTarget, 'windowClose', e.target.value)}
+                      onInput={(e) => updateStopField(activeTarget, 'windowClose', e.target.value)}
+                      onBlur={(e) => updateStopField(activeTarget, 'windowClose', e.target.value)}
+                      className={errors[`stop_${activeTarget}_close`] ? 'error' : ''}
+                      style={{ padding: '6px 8px', fontSize: '13px' }}
+                    />
+                    {errors[`stop_${activeTarget}_close`] && (
+                      <p style={{ color: '#ef4444', fontSize: '11px', marginTop: '2px' }}>
+                        {errors[`stop_${activeTarget}_close`]}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )
+        )}
+
+        {/* ── Main Submission Button ── */}
+        <div style={{ marginTop: '14px' }}>
+          <button
+            onClick={handleSubmit}
+            disabled={loading}
+            className="btn-primary"
+            style={{
+              padding: '14px',
+              fontSize: '1.05rem',
+              fontWeight: 800,
+              borderRadius: '14px',
+              background: '#2563eb',
+              boxShadow: '0 4px 15px rgba(37, 99, 235, 0.35)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+            }}
+          >
+            {loading ? (
+              <>
+                <div className="spinner" style={{ width: 18, height: 18, borderTopColor: '#ffffff' }} />
+                <span>Optimizing Route…</span>
+              </>
+            ) : (
+              <span>🗺 Calculate Optimal Route ({stops.length} {stops.length === 1 ? 'stop' : 'stops'})</span>
+            )}
+          </button>
+        </div>
 
       </div>
+
     </div>
   );
 }
